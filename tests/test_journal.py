@@ -68,6 +68,15 @@ def test_csv_is_shift_jis_with_crlf(tmp_path):
     assert raw.decode("cp932").count(",") == 24
 
 
+def test_lookalike_characters_are_substituted(tmp_path):
+    # 手入力のエクセルには上付きマイナスなどが紛れ込む
+    entry = make_entry(summary="東京出張（22⁻30日）")
+    path = tmp_path / "x.csv"
+    write_csv(str(path), [entry])
+    assert "東京出張（22-30日）" in path.read_text(encoding="cp932")
+    assert any("置換" in w for w in entry.warnings)
+
+
 def test_unencodable_character_is_reported(tmp_path):
     with pytest.raises(JournalError, match="変換できない文字"):
-        write_csv(str(tmp_path / "x.csv"), [make_entry(summary="髙" + "⼀")])
+        write_csv(str(tmp_path / "x.csv"), [make_entry(summary="⼀")])

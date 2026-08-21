@@ -122,3 +122,40 @@ def test_unmatched_transaction_falls_back_and_warns(ruleset):
 def test_all_rows_share_the_slip_number(ruleset):
     entries = build(ruleset, counterparty="ゼイリシ", amount=149685, slip_no=36)
     assert {e.slip_no for e in entries} == {36}
+
+
+EXCLUDE_RULES = textwrap.dedent(
+    """
+    contra:
+      account: 売掛金
+    rules:
+      - name: 通帳で計上済み(取込対象外)
+        kind: in
+        counterparty_pattern: "税務署"
+        exclude: true
+      - name: 売上
+        kind: in
+        counterparty_pattern: "トクイサキ"
+        contra_sub: 得意先A
+        account: 売上高
+        tax_category: 課税売上10%
+    """
+)
+
+
+@pytest.fixture
+def sales_ruleset(tmp_path):
+    path = tmp_path / "sales.yaml"
+    path.write_text(EXCLUDE_RULES, encoding="utf-8")
+    return RuleSet.load(str(path))
+
+
+def test_excluded_transaction_produces_no_entry(sales_ruleset):
+    assert build(sales_ruleset, kind="in", counterparty="西税務署", amount=80) == []
+
+
+def test_contra_sub_is_set_per_rule(sales_ruleset):
+    (entry,) = build(sales_ruleset, kind="in", counterparty="トクイサキ", amount=165000)
+    assert (entry.debit_account, entry.debit_sub) == ("売掛金", "得意先A")
+    assert entry.credit_account == "売上高"
+    assert entry.credit_tax_amount == 15000

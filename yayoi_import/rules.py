@@ -34,6 +34,15 @@ class Rule:
     confidence: str = "high"
     note: str = ""
 
+    #: 相手勘定（通常は預金や現金）をこのルールだけ差し替えたいときに指定する。
+    #: 売上のように、相手が売掛金で補助科目が取引先ごとに変わる場合に使う。
+    contra_account: str | None = None
+    contra_sub: str | None = None
+
+    #: このルールに当たった取引を仕訳にしない。別のエクセルや通帳で
+    #: 計上済みのものが混ざっている場合に使う。
+    exclude: bool = False
+
     kind: str | None = None  # "in" / "out" / None(両方)
     summary_pattern: str | None = None
     counterparty_pattern: str | None = None
@@ -54,7 +63,7 @@ class Rule:
         self._counterparty_re = (
             re.compile(self.counterparty_pattern) if self.counterparty_pattern else None
         )
-        if not self.account and not self.split and not self.compound:
+        if not self.account and not self.split and not self.compound and not self.exclude:
             raise ValueError(f"相手科目も内訳も指定されていません: {self.name}")
 
     def matches(self, kind: str, summary: str, counterparty: str, amount: int) -> bool:
@@ -73,8 +82,10 @@ class RuleSet:
     """ルールの集合。取引に当てはめて仕訳を組み立てる。"""
 
     def __init__(self, config: dict[str, Any]):
-        self.bank_account: str = config["bank"]["account"]
-        self.bank_sub: str = config["bank"].get("sub", "")
+        # 相手勘定。通帳なら普通預金、経費精算書なら現金、売上なら売掛金。
+        contra = config.get("contra") or config["bank"]
+        self.bank_account: str = contra["account"]
+        self.bank_sub: str = contra.get("sub", "")
         self.suspense_account: str = config.get("suspense_account", "諸口")
         self.fallback: dict[str, Any] = config.get("fallback", {})
         self.rules: list[Rule] = [Rule(**r) for r in config["rules"]]
@@ -102,6 +113,8 @@ class RuleSet:
     ) -> list[Entry]:
         """1取引 → 仕訳(1行以上)。当てはまるルールがなければ仮勘定に落とす。"""
         rule = self.find(kind, summary, counterparty, amount)
+        if rule is not None and rule.exclude:
+            return []
         if rule is None:
             return [self._fallback_entry(date, kind, summary, counterparty, amount, slip_no)]
         if rule.compound:
@@ -128,7 +141,10 @@ class RuleSet:
     ) -> Entry:
         tax = tax_amount(amount, rule.tax_category, rule.deduction)
         bank = dict(
-            account=self.bank_account, sub=self.bank_sub, tax_category="対象外", tax_amount=0
+            account=rule.contra_account or self.bank_account,
+            sub=self.bank_sub if rule.contra_sub is None else rule.contra_sub,
+            tax_category="対象外",
+            tax_amount=0,
         )
         other = dict(
             account=rule.account, sub=rule.sub, tax_category=rule.tax_category, tax_amount=tax
@@ -170,6 +186,8 @@ class RuleSet:
                 continue
             part_rule = Rule(
                 name=f"{rule.name}／{part['account']}",
+                contra_account=rule.contra_account,
+                contra_sub=rule.contra_sub,
                 account=part["account"],
                 sub=part.get("sub", ""),
                 tax_category=part.get("tax_category", "対象外"),

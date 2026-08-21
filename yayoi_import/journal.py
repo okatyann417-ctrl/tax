@@ -47,12 +47,38 @@ IDENTIFIER_FLAG = "2000"
 #: 弥生が取り込むCSVの文字コード。
 ENCODING = "cp932"
 
+#: 手入力のエクセルに紛れ込みやすい、Shift_JISに無い文字の置き換え表。
+#: 見た目が同じで文字コードだけ違うものに限る。意味が変わる置換はしない。
+CP932_SUBSTITUTES = {
+    "\u207b": "-",   # 上付きマイナス
+    "\u2212": "-",   # 全角マイナス記号
+    "\u2012": "-",   # フィギュアダッシュ
+    "\u2013": "-",   # エヌダッシュ
+    "\u2014": "\u2015",  # エムダッシュ → 全角ダッシュ
+    "\u223c": "\uff5e",  # チルダ演算子 → 全角チルダ
+    "\u2261": "=",   # 合同記号
+    "\u00a0": " ",   # ノーブレークスペース
+}
+
 #: 決算欄に指定できる値。空文字は通常仕訳。
 CLOSING_VALUES = ("", "中決", "本決")
 
 
 class JournalError(ValueError):
     """仕訳データが弥生の取り込み要件を満たさないときに送出する。"""
+
+
+def sanitize(text: str) -> tuple[str, list[str]]:
+    """Shift_JISに無い文字を、見た目が同じ文字へ置き換える。
+
+    置き換えた内容も返すので、勝手に直した箇所を確認リストに出せる。
+    """
+    changes = []
+    for bad, good in CP932_SUBSTITUTES.items():
+        if bad in text:
+            changes.append(f"{bad!r} を {good!r} に置換")
+            text = text.replace(bad, good)
+    return text, changes
 
 
 def format_date(value: _dt.date | _dt.datetime | str | None) -> str:
@@ -114,6 +140,12 @@ class Entry:
     def to_row(self) -> list[str]:
         """25列のCSV行に変換する。"""
         self.validate()
+        summary, changes = sanitize(self.summary)
+        memo, memo_changes = sanitize(self.memo)
+        for change in changes + memo_changes:
+            note = f"[medium] 摘要の文字を置換: {change}"
+            if note not in self.warnings:
+                self.warnings.append(note)
         return [
             IDENTIFIER_FLAG,
             str(self.slip_no),
@@ -131,12 +163,12 @@ class Entry:
             self.credit_tax_category,
             str(self.amount),
             str(self.credit_tax_amount),
-            self.summary,
+            summary,
             self.number,
             format_date(self.due_date),
             "0",  # タイプ
             "0",  # 生成元
-            self.memo,
+            memo,
             "0",  # 付箋1
             "0",  # 付箋2
             self.adjustment,

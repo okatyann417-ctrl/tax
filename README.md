@@ -13,6 +13,8 @@
 
 ## 使い方
 
+### 通帳から普通預金の仕訳を作る
+
 ```bash
 python3 tools/generate_passbook.py \
     clients/<関与先>/passbook.csv \
@@ -25,6 +27,25 @@ python3 tools/generate_passbook.py \
 
 `--opening` には期首（前期末）の預金残高を渡します。これが合っていれば、
 通帳に印字された差引残高との突合で転記ミスが必ず検出できます。
+
+### エクセルから売上・経費の仕訳を作る
+
+```bash
+python3 tools/generate_excel.py sales    売上入力.xlsx   rules_sales.yaml --from ... --to ... --out ...
+python3 tools/generate_excel.py expenses 経費精算書.xlsx rules_keihi.yaml --from ... --to ... --out ...
+```
+
+同じ取引が通帳とエクセルの両方に載っていることがあります。二重計上を避けるため、
+片方のルールに `exclude: true` を書いておくと、その取引は仕訳になりません。
+
+### 取り込む前に全体を確かめる
+
+```bash
+python3 tools/summarize.py out/*.csv
+```
+
+複数のCSVをまたいで科目別に集計します。売掛金の計上と回収、現金の引出と経費が
+つながっているか、貸借が一致しているかをここで確認してください。
 
 ## 通帳CSVの作り方
 
