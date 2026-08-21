@@ -1,0 +1,53 @@
+# 仕訳ルールのひな形。関与先ごとに clients/<関与先>/rules.yaml を作って使う。
+# 上から順に評価し、最初に一致したルールを採用する。
+bank:
+  account: 普通預金
+  sub: ○○銀行            # 補助科目。使っていなければ空でよい
+suspense_account: 諸口
+fallback:
+  account: 仮払金          # どのルールにも当たらなかった取引の受け皿
+
+rules:
+  # 単純な1対1の仕訳
+  - name: ATM引出
+    kind: out              # out=出金 / in=入金 / 省略=両方
+    summary_pattern: "^カード$"
+    account: 現金
+    summary: カード
+
+  - name: 振込手数料
+    kind: out
+    summary_pattern: "為替手数料"
+    account: 支払手数料
+    tax_category: 課対仕入10%
+
+  # 1つの入出金を複数科目へ按分する（残額は remainder の科目へ）
+  - name: 借入金の返済
+    kind: out
+    summary_pattern: "公庫"
+    summary: 借入返済
+    confidence: medium
+    note: 元本は返済予定表で要確認
+    split:
+      - {account: 長期借入金, amount: 43000}
+      - {account: 支払利息, remainder: true}
+
+  # 入出金額と仕訳金額が違う複合仕訳（源泉徴収など）。諸口で貸借を通す
+  - name: 士業への報酬
+    kind: out
+    counterparty_pattern: "ゼイリシ"
+    summary: 顧問報酬
+    compound:
+      debit:
+        - {account: 支払報酬料, amount: 165000, tax_category: 課対仕入10%}
+      credit:
+        - {bank: true}                                    # 残額(手取額)
+        - {account: 預り金, amount: 15315, summary: 源泉所得税}
+
+  # 売掛金の回収。{counterparty} と書くと振込名義を摘要に差し込む
+  - name: 回収(得意先A)
+    kind: in
+    counterparty_pattern: "トクイサキエー"
+    account: 売掛金
+    sub: 得意先A
+    summary: "{counterparty}"

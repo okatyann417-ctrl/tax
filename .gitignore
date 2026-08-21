@@ -1,0 +1,19 @@
+# ===== 関与先の実データは絶対にコミットしない =====
+# （このリポジトリは public のため）
+data/
+clients/*
+!clients/_example/
+out/
+*.xlsx
+*.xls
+*.pdf
+*.csv
+!tests/**/*.csv
+!clients/_example/**
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
