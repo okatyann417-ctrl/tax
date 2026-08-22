@@ -159,3 +159,47 @@ def test_contra_sub_is_set_per_rule(sales_ruleset):
     assert (entry.debit_account, entry.debit_sub) == ("売掛金", "得意先A")
     assert entry.credit_account == "売上高"
     assert entry.credit_tax_amount == 15000
+
+
+SMALL_AMOUNT_RULES = textwrap.dedent(
+    """
+    contra:
+      account: 現金
+    small_amount_special:
+      apply: true
+      threshold: 10000
+    rules:
+      - name: 飲食代
+        kind: out
+        summary_pattern: "接待費"
+        account: 交際費
+        tax_category: 課対仕入10%
+        deduction: 80%経過措置
+    """
+)
+
+
+@pytest.fixture
+def small_amount_ruleset(tmp_path):
+    path = tmp_path / "keihi.yaml"
+    path.write_text(SMALL_AMOUNT_RULES, encoding="utf-8")
+    return RuleSet.load(str(path))
+
+
+def test_under_the_threshold_gets_full_deduction(small_amount_ruleset):
+    # 税込9,999円 → 少額特例で全額控除（909円）
+    (entry,) = build(small_amount_ruleset, summary="接待費", amount=9999)
+    assert entry.debit_tax_amount == 909
+
+
+def test_at_or_above_the_threshold_keeps_the_transitional_rate(small_amount_ruleset):
+    # 税込10,000円 → 経過措置8割（909 × 0.8 = 727）
+    (entry,) = build(small_amount_ruleset, summary="接待費", amount=10000)
+    assert entry.debit_tax_amount == 727
+
+
+def test_special_is_off_unless_applied(tmp_path):
+    path = tmp_path / "off.yaml"
+    path.write_text(SMALL_AMOUNT_RULES.replace("apply: true", "apply: false"), encoding="utf-8")
+    (entry,) = build(RuleSet.load(str(path)), summary="接待費", amount=9999)
+    assert entry.debit_tax_amount == 727

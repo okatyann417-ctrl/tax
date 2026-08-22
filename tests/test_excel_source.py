@@ -3,7 +3,12 @@ import datetime
 import openpyxl
 import pytest
 
-from yayoi_import.excel_source import read_expenses, read_sales
+from yayoi_import.excel_source import (
+    read_expenses,
+    read_sales,
+    sheet_totals,
+    verify_expense_totals,
+)
 
 
 @pytest.fixture
@@ -72,3 +77,59 @@ def test_one_line_can_hold_several_categories(expense_book):
 
 def test_total_row_stops_reading(expense_book):
     assert not any(r.content == "合計" for r in read_expenses(expense_book))
+
+
+def test_rows_without_the_amount_column_are_still_read(tmp_path):
+    """右端の「金額」欄が空でも、費目欄に金額があれば計上する。
+
+    関与先の経費精算書は金額欄の入力漏れが多く、合計行のO列も式が崩れている。
+    金額の正は費目欄（宿泊費〜その他）のほうにある。
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "25年8月"
+    ws.cell(9, 9, 560000), ws.cell(9, 10, "東京出張28日間")  # O列は空
+    ws.cell(10, 1, datetime.datetime(2025, 8, 20))
+    ws.cell(10, 4, 5000), ws.cell(10, 10, "スイカチャージ代"), ws.cell(10, 15, 5000)
+    path = tmp_path / "keihi.xlsx"
+    wb.save(path)
+    rows = read_expenses(str(path))
+    assert sorted(r.amount for r in rows) == [5000, 560000]
+
+
+def test_totals_are_checked_against_each_sheet(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "25年8月"
+    ws.cell(9, 4, 5000), ws.cell(9, 10, "交通費"), ws.cell(9, 15, 5000)
+    ws.cell(10, 9, 560000), ws.cell(10, 10, "出張手当")
+    # 合計行は費目欄の合計で読む（O列は当てにしない）
+    ws.cell(11, 4, 5000), ws.cell(11, 9, 560000), ws.cell(11, 10, "合計"), ws.cell(11, 15, 5000)
+    path = tmp_path / "keihi.xlsx"
+    wb.save(path)
+    assert sheet_totals(str(path)) == {"25年8月": 565000}
+    assert verify_expense_totals(read_expenses(str(path)), str(path)) == []
+
+
+def test_mismatched_total_is_reported(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "25年8月"
+    ws.cell(9, 4, 5000), ws.cell(9, 10, "交通費"), ws.cell(9, 15, 5000)
+    ws.cell(10, 4, 9999), ws.cell(10, 10, "合計")
+    path = tmp_path / "keihi.xlsx"
+    wb.save(path)
+    problems = verify_expense_totals(read_expenses(str(path)), str(path))
+    assert problems and "一致しません" in problems[0]
+
+
+def test_fractional_amount_is_truncated_and_flagged(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "26年4月"
+    ws.cell(9, 9, 49.6), ws.cell(9, 10, "ゴルフプレー費")
+    path = tmp_path / "keihi.xlsx"
+    wb.save(path)
+    (row,) = read_expenses(str(path))
+    assert row.amount == 49
+    assert any("整数ではありません" in w for w in row.warnings)

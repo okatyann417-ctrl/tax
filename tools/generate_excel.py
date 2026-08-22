@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from yayoi_import.excel_source import read_expenses, read_sales
+from yayoi_import.excel_source import read_expenses, read_sales, verify_expense_totals
 from yayoi_import.journal import write_csv
 from yayoi_import.rules import RuleSet
 
@@ -37,9 +37,14 @@ def main() -> int:
             for r in read_sales(args.workbook)
         ]
     else:
+        rows = read_expenses(args.workbook)
+        # 行の取りこぼしはここで止める。各月シートの合計行と突き合わせる。
+        problems = verify_expense_totals(rows, args.workbook)
+        if problems:
+            raise SystemExit("シートの合計行と一致しません:\n  " + "\n  ".join(problems))
+        print(f"シート合計行との突合 OK（{len(rows)}件）")
         records = [
-            ("out", r.date, r.category, r.content, r.amount, r.warnings)
-            for r in read_expenses(args.workbook)
+            ("out", r.date, r.category, r.content, r.amount, r.warnings) for r in rows
         ]
 
     total_all = sum(r[4] for r in records)

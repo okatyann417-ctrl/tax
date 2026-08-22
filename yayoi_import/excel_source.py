@@ -71,6 +71,9 @@ def read_sales(path: str, sheet: str = "売上入力", first_row: int = 5) -> li
 def read_expenses(path: str) -> list[ExpenseRow]:
     """経費精算書（月ごとのシート）を読む。
 
+    金額は費目欄（宿泊費〜その他）から拾う。右端の「金額」欄と合計行のO列は
+    入力漏れや式の崩れがあり当てにならないため、参照しない。
+
     日付欄の「年」は入力時にずれていることがあるため、シート名の年月を正とし、
     日付欄からは日だけを取る。月がシートと食い違う行には注記を付ける。
     """
@@ -87,7 +90,7 @@ def read_expenses(path: str) -> list[ExpenseRow]:
             content = ws.cell(r, 10).value
             if content == "合計":
                 break
-            if not ws.cell(r, 15).value:
+            if not any(ws.cell(r, column).value for column in EXPENSE_COLUMNS):
                 continue
             warnings: list[str] = []
             cell_date = ws.cell(r, 1).value
@@ -103,6 +106,10 @@ def read_expenses(path: str) -> list[ExpenseRow]:
                 amount = ws.cell(r, column).value
                 if not amount:
                     continue
+                row_warnings = list(warnings)
+                if int(amount) != amount:
+                    # 手入力の桁誤り（49.6円など）。円未満は帳簿に載せられない。
+                    row_warnings.append(f"金額が整数ではありません（{amount}）。切り捨てて計上")
                 rows.append(
                     ExpenseRow(
                         date=_dt.date(year, month, min(day, _days_in_month(year, month))),
@@ -111,10 +118,48 @@ def read_expenses(path: str) -> list[ExpenseRow]:
                         amount=int(amount),
                         sheet=name,
                         source_row=r,
-                        warnings=list(warnings),
+                        warnings=row_warnings,
                     )
                 )
     return rows
+
+
+def sheet_totals(path: str) -> dict[str, int]:
+    """各月シートの合計行を、費目欄（C〜I）の合計として読む。
+
+    合計行のO列は式が崩れている場合があるため使わない。
+    """
+    workbook = openpyxl.load_workbook(path, data_only=True)
+    totals: dict[str, int] = {}
+    for name in workbook.sheetnames:
+        if not _SHEET_MONTH.match(name):
+            continue
+        ws = workbook[name]
+        for r in range(9, ws.max_row + 1):
+            if ws.cell(r, 10).value == "合計":
+                totals[name] = int(
+                    sum(ws.cell(r, column).value or 0 for column in EXPENSE_COLUMNS)
+                )
+                break
+    return totals
+
+
+def verify_expense_totals(rows: list[ExpenseRow], path: str) -> list[str]:
+    """読み取った明細が、各月シートの合計行と一致するか確かめる。
+
+    行の取りこぼしをその場で見つけるための検算。食い違ったシート名を返す。
+    """
+    read = {}
+    for row in rows:
+        read[row.sheet] = read.get(row.sheet, 0) + row.amount
+    problems = []
+    for sheet, total in sheet_totals(path).items():
+        if read.get(sheet, 0) != total:
+            problems.append(
+                f"{sheet}: 明細の合計 {read.get(sheet, 0):,} が"
+                f" シートの合計行 {total:,} と一致しません"
+            )
+    return problems
 
 
 def _days_in_month(year: int, month: int) -> int:

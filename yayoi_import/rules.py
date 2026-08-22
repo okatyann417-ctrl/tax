@@ -87,6 +87,13 @@ class RuleSet:
         self.bank_account: str = contra["account"]
         self.bank_sub: str = contra.get("sub", "")
         self.suspense_account: str = config.get("suspense_account", "諸口")
+        # 少額特例（税込1万円未満の課税仕入れはインボイスの保存を要しない）。
+        # 基準期間の課税売上高1億円以下（または特定期間5千万円以下）の事業者が、
+        # 令和5年10月1日から令和11年9月30日までの課税仕入れについて適用できる。
+        special = config.get("small_amount_special") or {}
+        self.small_amount_threshold: int | None = (
+            special.get("threshold") if special.get("apply") else None
+        )
         self.fallback: dict[str, Any] = config.get("fallback", {})
         self.rules: list[Rule] = [Rule(**r) for r in config["rules"]]
 
@@ -136,10 +143,19 @@ class RuleSet:
             return rule.summary.format(summary=summary, counterparty=counterparty)
         return " ".join(part for part in (summary, counterparty) if part)
 
+    def deduction_for(self, amount: int, deduction: str) -> str:
+        """少額特例を織り込んだ仕入税額控除の割合を返す。
+
+        税込1万円未満の課税仕入れは、インボイスの保存がなくても全額控除できる。
+        """
+        if self.small_amount_threshold and amount < self.small_amount_threshold:
+            return "100%"
+        return deduction
+
     def _entry(
         self, rule, date, kind, summary, counterparty, amount, slip_no, bank_amount
     ) -> Entry:
-        tax = tax_amount(amount, rule.tax_category, rule.deduction)
+        tax = tax_amount(amount, rule.tax_category, self.deduction_for(amount, rule.deduction))
         bank = dict(
             account=rule.contra_account or self.bank_account,
             sub=self.bank_sub if rule.contra_sub is None else rule.contra_sub,
@@ -280,11 +296,12 @@ class RuleSet:
                 account=self.bank_account, sub=self.bank_sub, tax_category="対象外", tax_amount=0
             )
         category = part.get("tax_category", "対象外")
+        deduction = self.deduction_for(part["amount"], part.get("deduction", "100%"))
         return dict(
             account=part["account"],
             sub=part.get("sub", ""),
             tax_category=category,
-            tax_amount=tax_amount(part["amount"], category, part.get("deduction", "100%")),
+            tax_amount=tax_amount(part["amount"], category, deduction),
         )
 
     def _fallback_entry(self, date, kind, summary, counterparty, amount, slip_no) -> Entry:
