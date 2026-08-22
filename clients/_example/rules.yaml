@@ -3,7 +3,6 @@
 bank:
   account: 普通預金
   sub: ○○銀行            # 補助科目。使っていなければ空でよい
-suspense_account: 諸口
 fallback:
   account: 仮払金          # どのルールにも当たらなかった取引の受け皿
 

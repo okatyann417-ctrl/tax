@@ -80,12 +80,17 @@ def test_deposit_puts_bank_on_debit(ruleset):
 
 
 def test_split_sends_remainder_to_interest(ruleset):
+    """元本と利息は1つの複合仕訳になる。相手勘定は先頭行に全額で立つ。"""
     entries = build(ruleset, summary="公庫", amount=48771)
-    assert [(e.debit_account, e.amount) for e in entries] == [
+    assert [(e.debit_account, e.debit_amount) for e in entries] == [
         ("長期借入金", 43000),
         ("支払利息", 5771),
     ]
-    assert sum(e.amount for e in entries) == 48771
+    assert [e.flag for e in entries] == ["2110", "2101"]
+    assert entries[0].credit_account == "普通預金"
+    assert entries[0].credit_amount == 48771
+    assert entries[1].credit_account == ""      # 2行目に相手勘定は立てない
+    assert sum(e.debit_amount for e in entries) == sum(e.credit_amount for e in entries)
 
 
 def test_split_rejects_amount_below_fixed_part(ruleset):
@@ -93,19 +98,19 @@ def test_split_rejects_amount_below_fixed_part(ruleset):
         build(ruleset, summary="公庫", amount=1000)
 
 
-def test_compound_balances_through_suspense_account(ruleset):
+def test_compound_uses_flags_not_a_suspense_account(ruleset):
     entries = build(ruleset, counterparty="ゼイリシ", amount=149685)
-    assert len(entries) == 3
-    assert sum(e.amount for e in entries if e.credit_account == "諸口") == 165000
-    assert sum(e.amount for e in entries if e.debit_account == "諸口") == 165000
-    # 銀行に出ていくのは手取額だけ
-    bank = [e for e in entries if e.credit_account == "普通預金"]
-    assert [e.amount for e in bank] == [149685]
-    # 源泉税は預り金へ
-    assert [e.amount for e in entries if e.credit_account == "預り金"] == [15315]
-    # 報酬総額には消費税が付く
-    fee = next(e for e in entries if e.debit_account == "支払報酬料")
-    assert fee.debit_tax_amount == 15000
+    assert len(entries) == 2
+    assert [e.flag for e in entries] == ["2110", "2101"]
+    assert all(e.entry_type == 3 for e in entries)
+    # 借方は報酬総額、貸方は手取額と源泉税に割れる
+    assert (entries[0].debit_account, entries[0].debit_amount) == ("支払報酬料", 165000)
+    assert (entries[0].credit_account, entries[0].credit_amount) == ("普通預金", 149685)
+    assert (entries[1].credit_account, entries[1].credit_amount) == ("預り金", 15315)
+    assert entries[1].debit_account == ""
+    # 報酬総額に消費税が付き、貸借は一致する
+    assert entries[0].debit_tax_amount == 15000
+    assert sum(e.debit_amount for e in entries) == sum(e.credit_amount for e in entries) == 165000
 
 
 def test_compound_detects_wrong_bank_amount(ruleset):
@@ -186,20 +191,21 @@ def small_amount_ruleset(tmp_path):
     return RuleSet.load(str(path))
 
 
-def test_under_the_threshold_gets_full_deduction(small_amount_ruleset):
-    # 税込9,999円 → 少額特例で全額控除（909円）
+def test_under_the_threshold_is_treated_as_qualified(small_amount_ruleset):
+    """少額特例は税区分名に出る。税額はどちらでも控除前の全額。"""
     (entry,) = build(small_amount_ruleset, summary="接待費", amount=9999)
+    assert entry.debit_tax_category == "課対仕入内10%適格"
     assert entry.debit_tax_amount == 909
 
 
-def test_at_or_above_the_threshold_keeps_the_transitional_rate(small_amount_ruleset):
-    # 税込10,000円 → 経過措置8割（909 × 0.8 = 727）
+def test_at_or_above_the_threshold_keeps_the_transitional_category(small_amount_ruleset):
     (entry,) = build(small_amount_ruleset, summary="接待費", amount=10000)
-    assert entry.debit_tax_amount == 727
+    assert entry.debit_tax_category == "課対仕入内10%区分80%"
+    assert entry.debit_tax_amount == 909
 
 
 def test_special_is_off_unless_applied(tmp_path):
     path = tmp_path / "off.yaml"
     path.write_text(SMALL_AMOUNT_RULES.replace("apply: true", "apply: false"), encoding="utf-8")
     (entry,) = build(RuleSet.load(str(path)), summary="接待費", amount=9999)
-    assert entry.debit_tax_amount == 727
+    assert entry.debit_tax_category == "課対仕入内10%区分80%"

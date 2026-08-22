@@ -90,9 +90,9 @@ def verify_entries(entries: list[Entry], bank_account: str, expected_net: int) -
     net = 0
     for entry in entries:
         if entry.debit_account == bank_account:
-            net += entry.amount
+            net += entry.debit_amount
         if entry.credit_account == bank_account:
-            net -= entry.amount
+            net -= entry.credit_amount
     if net != expected_net:
         raise BalanceMismatch(
             f"仕訳の預金増減が通帳と一致しません: 仕訳={net:,} 通帳={expected_net:,}"

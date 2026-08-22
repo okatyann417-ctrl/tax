@@ -12,8 +12,8 @@ from typing import Any, Iterable
 
 import yaml
 
-from .journal import Entry
-from .tax import tax_amount
+from .journal import Entry, mark_compound
+from .tax import category_name, tax_amount
 
 #: 確信度。low の仕訳は取り込み前に必ず人が確認する。
 CONFIDENCE_LEVELS = ("high", "medium", "low")
@@ -155,19 +155,22 @@ class RuleSet:
     def _entry(
         self, rule, date, kind, summary, counterparty, amount, slip_no, bank_amount
     ) -> Entry:
-        tax = tax_amount(amount, rule.tax_category, self.deduction_for(amount, rule.deduction))
+        deduction = self.deduction_for(amount, rule.deduction)
+        other = dict(
+            account=rule.account,
+            sub=rule.sub,
+            tax_category=category_name(rule.tax_category, deduction),
+            tax_amount=tax_amount(amount, rule.tax_category),
+        )
         bank = dict(
             account=rule.contra_account or self.bank_account,
             sub=self.bank_sub if rule.contra_sub is None else rule.contra_sub,
             tax_category="対象外",
             tax_amount=0,
         )
-        other = dict(
-            account=rule.account, sub=rule.sub, tax_category=rule.tax_category, tax_amount=tax
-        )
         # 入金なら銀行が借方、出金なら銀行が貸方。
         debit, credit = (bank, other) if kind == "in" else (other, bank)
-        entry = Entry(
+        entry = Entry.simple(
             date=date,
             amount=amount,
             slip_no=slip_no,
@@ -195,113 +198,146 @@ class RuleSet:
         fixed = sum(p["amount"] for p in rule.split if "amount" in p)
         if fixed > amount:
             raise ValueError(f"内訳の合計が入出金額を超えています: {rule.name} {date}")
-        entries: list[Entry] = []
+        # 相手勘定（預金など）は入出金額のまま1行だけ立て、内訳は各行の反対側に置く。
+        # 弥生は同じ伝票No.の連続行を1つの複合仕訳として取り込む。
+        legs = []
         for part in rule.split:
             part_amount = part.get("amount", amount - fixed)
             if part_amount <= 0:
                 continue
-            part_rule = Rule(
-                name=f"{rule.name}／{part['account']}",
-                contra_account=rule.contra_account,
-                contra_sub=rule.contra_sub,
+            legs.append((part, part_amount))
+
+        entries: list[Entry] = []
+        for index, (part, part_amount) in enumerate(legs):
+            deduction = self.deduction_for(part_amount, part.get("deduction", "100%"))
+            base = part.get("tax_category", "対象外")
+            leg = dict(
                 account=part["account"],
                 sub=part.get("sub", ""),
-                tax_category=part.get("tax_category", "対象外"),
-                deduction=part.get("deduction", "100%"),
-                summary=part.get("summary", rule.summary),
-                confidence=part.get("confidence", rule.confidence),
-                note=part.get("note", rule.note),
+                tax_category=category_name(base, deduction),
+                tax_amount=tax_amount(part_amount, base),
             )
-            entries.append(
-                self._entry(
-                    part_rule, date, kind, summary, counterparty, part_amount, slip_no, amount
+            # 相手勘定は先頭行にだけ、入出金の全額で立てる。
+            contra_amount = amount if index == 0 else 0
+            contra = dict(
+                account=(rule.contra_account or self.bank_account) if contra_amount else "",
+                sub=(self.bank_sub if rule.contra_sub is None else rule.contra_sub)
+                if contra_amount
+                else "",
+            )
+            label = part.get("summary", rule.summary) or self._label(rule, summary, counterparty)
+            if kind == "in":
+                entry = Entry(
+                    date=date, slip_no=slip_no, summary=label,
+                    debit_account=contra["account"], debit_sub=contra["sub"],
+                    debit_amount=contra_amount,
+                    credit_account=leg["account"], credit_sub=leg["sub"],
+                    credit_tax_category=leg["tax_category"],
+                    credit_amount=part_amount, credit_tax_amount=leg["tax_amount"],
                 )
-            )
+            else:
+                entry = Entry(
+                    date=date, slip_no=slip_no, summary=label,
+                    debit_account=leg["account"], debit_sub=leg["sub"],
+                    debit_tax_category=leg["tax_category"],
+                    debit_amount=part_amount, debit_tax_amount=leg["tax_amount"],
+                    credit_account=contra["account"], credit_sub=contra["sub"],
+                    credit_amount=contra_amount,
+                )
+            entries.append(entry)
+        if rule.confidence != "high":
+            entries[0].warnings.append(f"[{rule.confidence}] {rule.name}: {rule.note}".strip(": "))
+        mark_compound(entries)
         return entries
 
     def _compound_entries(
         self, rule, date, kind, summary, counterparty, amount, slip_no
     ) -> list[Entry]:
-        """源泉徴収のように、入出金額と仕訳金額が一致しない仕訳を諸口で表現する。
+        """源泉徴収のように、入出金額と仕訳金額が一致しない仕訳を組み立てる。
 
-        弥生は同一伝票No.の連続行を1つの複合仕訳として取り込む。片側を諸口に
-        しておき、諸口の借方合計と貸方合計が一致するように行を並べる。
+        弥生は同じ伝票No.の連続行を1つの複合仕訳として取り込む。行ごとに借方・貸方を
+        独立に持てるので、借方明細と貸方明細を上から順に並べ、余った側は空にする。
         """
-        sides = {
-            "debit": list(rule.compound.get("debit", [])),
-            "credit": list(rule.compound.get("credit", [])),
-        }
-        totals = {}
-        for name, parts in sides.items():
+        debits = [dict(part) for part in rule.compound.get("debit", [])]
+        credits = [dict(part) for part in rule.compound.get("credit", [])]
+        for parts in (debits, credits):
             fixed = sum(p["amount"] for p in parts if "amount" in p)
             for part in parts:
-                # 金額の指定がない行(通常は銀行側)は残額を引き受ける。
                 part.setdefault("amount", None)
-            totals[name] = fixed
-        gross = max(totals["debit"], totals["credit"])
-        for name, parts in sides.items():
+            gross = max(
+                sum(p["amount"] for p in debits if p.get("amount")),
+                sum(p["amount"] for p in credits if p.get("amount")),
+                fixed,
+            )
             for part in parts:
                 if part["amount"] is None:
-                    part["amount"] = gross - totals[name]
+                    part["amount"] = gross - fixed
 
-        debit_total = sum(p["amount"] for p in sides["debit"])
-        credit_total = sum(p["amount"] for p in sides["credit"])
+        debit_total = sum(p["amount"] for p in debits)
+        credit_total = sum(p["amount"] for p in credits)
         if debit_total != credit_total:
             raise ValueError(
-                f"複合仕訳の貸借が一致しません: {rule.name} {date} 借方{debit_total} 貸方{credit_total}"
+                f"複合仕訳の貸借が一致しません: {rule.name} {date} "
+                f"借方{debit_total} 貸方{credit_total}"
             )
-        bank_side_total = sum(
-            p["amount"] for parts in sides.values() for p in parts if p.get("bank")
-        )
-        if bank_side_total != amount:
+        bank_total = sum(p["amount"] for p in debits + credits if p.get("bank"))
+        if bank_total != amount:
             raise ValueError(
                 f"銀行側の金額が入出金額と一致しません: {rule.name} {date} "
-                f"仕訳{bank_side_total} 通帳{amount}"
+                f"仕訳{bank_total} 通帳{amount}"
             )
 
+        default_label = self._label(rule, summary, counterparty)
         entries: list[Entry] = []
-        for name, parts in sides.items():
-            for part in parts:
-                leg = self._leg(part, rule)
-                # 借方明細なら貸方が諸口、貸方明細なら借方が諸口。
-                other = dict(
-                    account=self.suspense_account, sub="", tax_category="対象外", tax_amount=0
+        for index in range(max(len(debits), len(credits))):
+            debit = self._leg(debits[index], rule) if index < len(debits) else None
+            credit = self._leg(credits[index], rule) if index < len(credits) else None
+            label = next(
+                (p.get("summary") for p in (debits + credits)[index : index + 1] if p.get("summary")),
+                None,
+            )
+            if index < len(debits) and debits[index].get("summary"):
+                label = debits[index]["summary"]
+            elif index < len(credits) and credits[index].get("summary"):
+                label = credits[index]["summary"]
+            entries.append(
+                Entry(
+                    date=date,
+                    slip_no=slip_no,
+                    summary=label or default_label,
+                    debit_account=debit["account"] if debit else "",
+                    debit_sub=debit["sub"] if debit else "",
+                    debit_tax_category=debit["tax_category"] if debit else "対象外",
+                    debit_amount=debit["amount"] if debit else 0,
+                    debit_tax_amount=debit["tax_amount"] if debit else 0,
+                    credit_account=credit["account"] if credit else "",
+                    credit_sub=credit["sub"] if credit else "",
+                    credit_tax_category=credit["tax_category"] if credit else "対象外",
+                    credit_amount=credit["amount"] if credit else 0,
+                    credit_tax_amount=credit["tax_amount"] if credit else 0,
                 )
-                debit, credit = (leg, other) if name == "debit" else (other, leg)
-                entries.append(
-                    Entry(
-                        date=date,
-                        amount=part["amount"],
-                        slip_no=slip_no,
-                        summary=part.get("summary") or self._label(rule, summary, counterparty),
-                        debit_account=debit["account"],
-                        debit_sub=debit["sub"],
-                        debit_tax_category=debit["tax_category"],
-                        debit_tax_amount=debit["tax_amount"],
-                        credit_account=credit["account"],
-                        credit_sub=credit["sub"],
-                        credit_tax_category=credit["tax_category"],
-                        credit_tax_amount=credit["tax_amount"],
-                    )
-                )
+            )
         if rule.confidence != "high" or rule.note:
             label = rule.confidence if rule.confidence != "high" else "参考"
             entries[0].warnings.append(f"[{label}] {rule.name}: {rule.note}".strip(": "))
+        mark_compound(entries)
         return entries
 
     def _leg(self, part: dict[str, Any], rule: Rule) -> dict[str, Any]:
         """複合仕訳の1明細を、勘定科目・補助科目・税区分に展開する。"""
         if part.get("bank"):
             return dict(
-                account=self.bank_account, sub=self.bank_sub, tax_category="対象外", tax_amount=0
+                account=self.bank_account, sub=self.bank_sub,
+                tax_category="対象外", tax_amount=0, amount=part["amount"],
             )
-        category = part.get("tax_category", "対象外")
+        base = part.get("tax_category", "対象外")
         deduction = self.deduction_for(part["amount"], part.get("deduction", "100%"))
         return dict(
             account=part["account"],
             sub=part.get("sub", ""),
-            tax_category=category,
-            tax_amount=tax_amount(part["amount"], category, deduction),
+            tax_category=category_name(base, deduction),
+            tax_amount=tax_amount(part["amount"], base),
+            amount=part["amount"],
         )
 
     def _fallback_entry(self, date, kind, summary, counterparty, amount, slip_no) -> Entry:
