@@ -18,6 +18,9 @@ from .tax import category_name, tax_amount
 #: 確信度。low の仕訳は取り込み前に必ず人が確認する。
 CONFIDENCE_LEVELS = ("high", "medium", "low")
 
+#: 適格請求書発行事業者の登録番号。T のあとに13桁。
+INVOICE_NUMBER = re.compile(r"T\d{13}")
+
 
 @dataclass
 class Rule:
@@ -90,6 +93,9 @@ class RuleSet:
         # 少額特例（税込1万円未満の課税仕入れはインボイスの保存を要しない）。
         # 基準期間の課税売上高1億円以下（または特定期間5千万円以下）の事業者が、
         # 令和5年10月1日から令和11年9月30日までの課税仕入れについて適用できる。
+        # 摘要に適格請求書発行事業者の登録番号(T+13桁)が書かれていれば、
+        # 区分記載の指定より優先して適格として扱う。
+        self.detect_invoice_number: bool = config.get("detect_invoice_number", True)
         special = config.get("small_amount_special") or {}
         self.small_amount_threshold: int | None = (
             special.get("threshold") if special.get("apply") else None
@@ -143,11 +149,15 @@ class RuleSet:
             return rule.summary.format(summary=summary, counterparty=counterparty)
         return " ".join(part for part in (summary, counterparty) if part)
 
-    def deduction_for(self, amount: int, deduction: str) -> str:
-        """少額特例を織り込んだ仕入税額控除の割合を返す。
+    def deduction_for(self, amount: int, deduction: str, text: str = "") -> str:
+        """仕入税額控除の割合を決める。
 
-        税込1万円未満の課税仕入れは、インボイスの保存がなくても全額控除できる。
+        次のいずれかに当たれば、区分記載の指定より優先して全額控除とする。
+          - 摘要に適格請求書発行事業者の登録番号(T+13桁)が書かれている
+          - 少額特例（税込1万円未満の課税仕入れ）の対象
         """
+        if self.detect_invoice_number and INVOICE_NUMBER.search(text):
+            return "100%"
         if self.small_amount_threshold and amount < self.small_amount_threshold:
             return "100%"
         return deduction
@@ -155,7 +165,7 @@ class RuleSet:
     def _entry(
         self, rule, date, kind, summary, counterparty, amount, slip_no, bank_amount
     ) -> Entry:
-        deduction = self.deduction_for(amount, rule.deduction)
+        deduction = self.deduction_for(amount, rule.deduction, f"{summary} {counterparty}")
         other = dict(
             account=rule.account,
             sub=rule.sub,
@@ -209,7 +219,9 @@ class RuleSet:
 
         entries: list[Entry] = []
         for index, (part, part_amount) in enumerate(legs):
-            deduction = self.deduction_for(part_amount, part.get("deduction", "100%"))
+            deduction = self.deduction_for(
+                part_amount, part.get("deduction", "100%"), f"{summary} {counterparty}"
+            )
             base = part.get("tax_category", "対象外")
             leg = dict(
                 account=part["account"],

@@ -209,3 +209,32 @@ def test_special_is_off_unless_applied(tmp_path):
     path.write_text(SMALL_AMOUNT_RULES.replace("apply: true", "apply: false"), encoding="utf-8")
     (entry,) = build(RuleSet.load(str(path)), summary="接待費", amount=9999)
     assert entry.debit_tax_category == "課対仕入内10%区分80%"
+
+
+def test_registration_number_in_the_summary_wins_over_the_transitional_rate(small_amount_ruleset):
+    """摘要に登録番号(T+13桁)があれば、区分記載の指定より優先して適格とする。"""
+    (entry,) = build(
+        small_amount_ruleset, summary="接待費", counterparty="飲食代(T9011201021882)㈱annex",
+        amount=59500,
+    )
+    assert entry.debit_tax_category == "課対仕入内10%適格"
+
+
+def test_a_number_that_is_not_a_registration_number_is_ignored(small_amount_ruleset):
+    (entry,) = build(
+        small_amount_ruleset, summary="接待費", counterparty="飲食代(T90112010)", amount=59500
+    )
+    assert entry.debit_tax_category == "課対仕入内10%区分80%"
+
+
+def test_detection_can_be_turned_off(tmp_path):
+    path = tmp_path / "off.yaml"
+    path.write_text(
+        SMALL_AMOUNT_RULES.replace("contra:", "detect_invoice_number: false\ncontra:"),
+        encoding="utf-8",
+    )
+    (entry,) = build(
+        RuleSet.load(str(path)), summary="接待費",
+        counterparty="飲食代(T9011201021882)", amount=59500,
+    )
+    assert entry.debit_tax_category == "課対仕入内10%区分80%"
