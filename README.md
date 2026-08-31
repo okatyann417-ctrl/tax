@@ -21,8 +21,13 @@ python3 tools/build_journal.py \
     --sales    売上入力.xlsx   clients/<関与先>/rules_sales.yaml \
     --expenses 経費精算書.xlsx clients/<関与先>/rules_keihi.yaml \
     --from 2025-07-01 --to 2026-06-30 \
-    --out out/仕訳日記帳.csv --review out/確認リスト.md
+    --out out/仕訳日記帳.csv \
+    --review out/確認リスト.md --review-docx out/確認リスト.docx
 ```
+
+確認リストはMarkdownとWordの両方に出せます。Wordは確信度ごとに章を分け、
+1件ずつチェックボックスを付けてあるので、そのまま回付や打合せに使えます。
+（Word出力には `python-docx` が必要です）
 
 資料は必要なものだけ渡せます。日付順に並べ替え、伝票No.を通しで振り直します。
 `--opening` には期首（前期末）の預金残高を渡します。

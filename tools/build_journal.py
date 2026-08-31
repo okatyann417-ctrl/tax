@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from yayoi_import import passbook
 from yayoi_import.excel_source import read_expenses, read_sales, verify_expense_totals
+from yayoi_import import review as review_report
 from yayoi_import.journal import check_balance, write_csv
 from yayoi_import.rules import RuleSet
 
@@ -69,7 +70,8 @@ def main() -> int:
     parser.add_argument("--from", dest="date_from", required=True)
     parser.add_argument("--to", dest="date_to", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--review")
+    parser.add_argument("--review", help="確認リスト(Markdown)の出力先")
+    parser.add_argument("--review-docx", help="確認リスト(Word)の出力先")
     parser.add_argument("--start-slip-no", type=int, default=1)
     args = parser.parse_args()
 
@@ -105,52 +107,15 @@ def main() -> int:
     written = write_csv(args.out, entries)
     print(f"書き出し: {args.out}（{written}行, Shift_JIS, 和暦）")
 
-    if args.review:
-        write_review(args.review, entries, len(groups))
-        print(f"確認リスト: {args.review}")
+    if args.review or args.review_docx:
+        report = review_report.build(entries, len(groups))
+        if args.review:
+            review_report.write_markdown(report, args.review)
+            print(f"確認リスト: {args.review}")
+        if args.review_docx:
+            review_report.write_docx(report, args.review_docx)
+            print(f"確認リスト(Word): {args.review_docx}")
     return 0
-
-
-def write_review(path, entries, slips) -> None:
-    flagged = [(e, w) for e in entries for w in e.warnings]
-    by_account = collections.Counter()
-    for entry in entries:
-        if entry.debit_account:
-            by_account[(entry.debit_account, entry.debit_sub)] += entry.debit_amount
-        if entry.credit_account:
-            by_account[(entry.credit_account, entry.credit_sub)] -= entry.credit_amount
-
-    lines = [
-        "# インポート前チェックリスト",
-        "",
-        f"- {slips}伝票 / {len(entries)}行",
-        f"- 要確認: {len({w for _, w in flagged})}種類 / {len(flagged)}件",
-        "",
-        "## 科目別の残高",
-        "",
-        "| 勘定科目 | 補助科目 | 借方－貸方 |",
-        "| --- | --- | ---: |",
-    ]
-    for (account, sub), amount in sorted(by_account.items(), key=lambda x: -abs(x[1])):
-        lines.append(f"| {account} | {sub} | {amount:,} |")
-
-    lines += ["", "## 要確認の仕訳", "", "| 日付 | 伝票No | 借方 | 貸方 | 金額 | 確認事項 |",
-              "| --- | ---: | --- | --- | ---: | --- |"]
-    seen = set()
-    for entry, warning in flagged:
-        if warning in seen:
-            continue
-        seen.add(warning)
-        count = sum(1 for _, w in flagged if w == warning)
-        debit = f"{entry.debit_account}{'/' + entry.debit_sub if entry.debit_sub else ''}"
-        credit = f"{entry.credit_account}{'/' + entry.credit_sub if entry.credit_sub else ''}"
-        suffix = f"（該当{count}件）" if count > 1 else ""
-        lines.append(
-            f"| {entry.date} | {entry.slip_no} | {debit} | {credit} "
-            f"| {entry.amount:,} | {warning}{suffix} |"
-        )
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":
